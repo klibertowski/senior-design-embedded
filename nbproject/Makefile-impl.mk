@@ -24,7 +24,7 @@ CLEAN_SUBPROJECTS=${CLEAN_SUBPROJECTS_${SUBPROJECTS}}
 
 
 # Project Name
-PROJECTNAME=SeniorDesignProject.X
+PROJECTNAME=senior-design-embedded
 
 # Active Configuration
 DEFAULTCONF=default

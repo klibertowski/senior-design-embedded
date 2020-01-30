@@ -10,9 +10,9 @@ CND_CONF=default
 CND_DISTDIR=dist
 TMPDIR=build/${CND_CONF}/${IMAGE_TYPE}/tmp-packaging
 TMPDIRNAME=tmp-packaging
-OUTPUT_PATH=dist/${CND_CONF}/${IMAGE_TYPE}/SeniorDesignProject.X.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
-OUTPUT_BASENAME=SeniorDesignProject.X.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
-PACKAGE_TOP_DIR=seniordesignproject.x/
+OUTPUT_PATH=dist/${CND_CONF}/${IMAGE_TYPE}/senior-design-embedded.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
+OUTPUT_BASENAME=senior-design-embedded.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
+PACKAGE_TOP_DIR=senior-design-embedded/
 
 # Functions
 function checkReturnCode
@@ -57,15 +57,15 @@ mkdir -p ${TMPDIR}
 
 # Copy files and create directories and links
 cd "${TOP}"
-makeDirectory ${TMPDIR}/seniordesignproject.x/bin
+makeDirectory ${TMPDIR}/senior-design-embedded/bin
 copyFileToTmpDir "${OUTPUT_PATH}" "${TMPDIR}/${PACKAGE_TOP_DIR}bin/${OUTPUT_BASENAME}" 0755
 
 
 # Generate tar file
 cd "${TOP}"
-rm -f ${CND_DISTDIR}/${CND_CONF}/package/seniordesignproject.x.tar
+rm -f ${CND_DISTDIR}/${CND_CONF}/package/senior-design-embedded.tar
 cd ${TMPDIR}
-tar -vcf ../../../../${CND_DISTDIR}/${CND_CONF}/package/seniordesignproject.x.tar *
+tar -vcf ../../../../${CND_DISTDIR}/${CND_CONF}/package/senior-design-embedded.tar *
 checkReturnCode
 
 # Cleanup
