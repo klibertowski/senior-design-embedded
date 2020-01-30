@@ -43,6 +43,8 @@
 int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(256)));
 //int BufferB[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(256)));
 
+// Bluetooth mac address D8:80:39:F9:17:92
+
 struct Impedance
 {
   float real;
