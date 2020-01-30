@@ -150,13 +150,15 @@ float in[SAMP_BUFF_SIZE];
 
 struct Impedance currImpedance;
 
+float R = 987.0;
+
 void __attribute__((interrupt, no_auto_psv)) _DMA1Interrupt(void)
 {
   int i;
   for (i = 0; i < SAMP_BUFF_SIZE; ++i)
   {
     vn[i] = convertSample(BufferA[0][i]);
-    in[i] = convertSample(BufferA[3][i]);
+    in[i] = convertSample(BufferA[3][i]) / R;
   }
 
   currImpedance = calcImpedance(&vn, &in, SAMP_BUFF_SIZE);
@@ -302,6 +304,7 @@ int main(void)
   initTimer3();
   Init_LCD();
 
+  setFrequency(5000.0);
   startSamp();
   
   while (1)
