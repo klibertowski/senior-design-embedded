@@ -31,6 +31,8 @@
 
 #define M_PI 3.141592653589793
 
+#define FCY 40000000
+
 // Define Message Buffer Length for ECAN1/ECAN2
 #define MAX_CHNUM 13       // Highest Analog input number in Channel Scan
 #define SAMP_BUFF_SIZE 64 // Size of the input buffer per analog input
@@ -100,7 +102,8 @@ void initADC()
 void setCon3()
 {
   //AD1CON3 = 0x0000;
-    AD1CON3 = 0x000F;
+    // AD1CON3 = 0x000F;
+    AD1CON3bits.ADCS = 63; // prescale of 64
 }
 
 void startSamp()
@@ -128,6 +131,11 @@ void initTimer3(){
     IFS0bits.T3IF = 0;  //Turn off interrupt flag
     IEC0bits.T3IE = 0;  //Enable interrupt
     T3CONbits.TON = 1;  //Turn Timer 3 on
+}
+
+void setFrequency(float frequency) {
+    float scale = 64.0;
+    PR3 = (int)(1 / frequency) / (scale * (1 / FCY));
 }
 
 void setDMACNT()
