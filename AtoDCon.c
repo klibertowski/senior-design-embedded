@@ -33,14 +33,13 @@
 #define FCY 40000000
 
 // Define Message Buffer Length for ECAN1/ECAN2
-#define MAX_CHNUM 13      // Highest Analog input number in Channel Scan
+#define MAX_CHNUM 4       // Highest Analog input number in Channel Scan
 #define SAMP_BUFF_SIZE 64 // Size of the input buffer per analog input
-#define NUM_CHS2SCAN 2    // Number of (input pins)channels enabled for channel scan
+#define NUM_CHS2SCAN 2    // Number of (input pins) channels enabled for channel scan
 
 // Number of locations for ADC buffer = 14 (AN0 to AN13) x 8 = 112 words
 // Align the buffer to 128 words or 256 bytes. This is needed for peripheral indirect mode
 int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(256)));
-//int BufferB[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(256)));
 
 // Bluetooth mac address D8:80:39:F9:17:92
 
@@ -53,18 +52,17 @@ struct Impedance
 void processADCSamples(int *);
 struct Impedance calcImpedance(float *, float *, int);
 float convertSample(int);
-void setCon3();
 void initADC();
 void readADC();
 void initDMA();
-void setDMACNT();
 
 void ms_delay(int N)
 {
   int delay;
   delay = N * 62.5; // N ms delay
   TMR1 = 0;         // reset TMR1
-  while (TMR1 < delay); // wait for delay time
+  while (TMR1 < delay)
+    ; // wait for delay time
 }
 
 void initClockPLL()
@@ -83,28 +81,40 @@ void initClockPLL()
 
 void initADC()
 {
-  AD1CON1 = 0x204C;
-  AD1CON2 = 0x0104;
-  setCon3();
-  AD1CON4 = 0x0006;
+  AD1CON1bits.ADDMABM = 0; // DMA buffers are built in scatter/gather mode
+  AD1CON1bits.FORM = 0;    // Data Output Format: unsigned integer (0-1023)
+  AD1CON1bits.SSRC = 2;    // Sample Clock Source: GP Timer starts conversion
+  AD1CON1bits.ASAM = 1;    // ADC Sample Control: Sampling begins immediately after conversion
+  AD1CON1bits.AD12B = 0;   // 10-bit ADC operation
 
-  AD1CHS123bits.CH123SA = 0; //CH1 is AN0
-  AD1CHS123bits.CH123NA = 0;
-  AD1CHS0bits.CH0SA = 3; //CH0 is AN3
+  AD1CON2bits.CSCNA = 1;               // Scan Input Selections for CH0+ during Sample A bit
+  AD1CON2bits.CHPS = 0;                // Converts CH0
+  AD1CON2bits.SMPI = NUM_CHS2SCAN - 1; // 4 ADC Channel is scanned
 
+  AD1CON3bits.ADRC = 0;  // ADC Clock is derived from Systems Clock
+  AD1CON3bits.ADCS = 63; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*64 = 1.6us (625Khz)
+                         // ADC Conversion Time for 10-bit Tc=12*Tab = 19.2us
+
+  AD1CON4bits.DMABL = 6; // Each buffer contains 64 words
+
+  //AD1CSSH/AD1CSSL: A/D Input Scan Selection Register
+  AD1CSSH = 0x0000;
+  AD1CSSLbits.CSS0 = 1; // Enable AN0 for channel scan
+  AD1CSSLbits.CSS3 = 1; // Enable AN3 for channel scan
+
+  // AD1CHS123bits.CH123SA = 0; //CH1 is AN0
+  // AD1CHS123bits.CH123NA = 0;
+  // AD1CHS0bits.CH0SA = 3; //CH0 is AN3
+
+  //AD1PCFGH/AD1PCFGL: Port Configuration Register
   AD1PCFGH = 0xFFFF;
   AD1PCFGL = 0xFFFF;
   AD1PCFGLbits.PCFG0 = 0; //AN0 is analog
   AD1PCFGLbits.PCFG3 = 0; //AN3 is analog
 
+  IFS0bits.AD1IF = 0;   // Clear the A/D interrupt flag bit
+  IEC0bits.AD1IE = 0;   // Do Not Enable A/D interrupt
   AD1CON1bits.ADON = 1; //Turn on AD
-}
-
-void setCon3()
-{
-  //AD1CON3 = 0x0000;
-  // AD1CON3 = 0x000F;
-  AD1CON3bits.ADCS = 63; // prescale of 64
 }
 
 void startSamp()
@@ -114,36 +124,33 @@ void startSamp()
 
 void initDMA()
 {
-  DMA1CON = 0x0020;
-  DMA1REQ = 0x000D;
-  DMA1STA = __builtin_dmaoffset(BufferA);
-  DMA1PAD = 0x0300;
-  setDMACNT();
+  DMA1C1Nbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
+  DMA1C1Nbits.MODE = 0;  // continuous ping pong disabled
+  DMA1PAD = (int)&ADC1BUF0;
+  DMA1CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
+  DMA1REQ = 13; // Select ADC1 as DMA Request source
 
-  IFS0bits.DMA1IF = 0; //clear interrupt
-  IEC0bits.DMA1IE = 1; //enable interrupt
+  DMA0STA = __builtin_dmaoffset(BufferA);
 
-  DMA1CONbits.CHEN = 1; //Turn DMA On
+  IFS0bits.DMA1IF = 0; //Clear the DMA interrupt flag bit
+  IEC0bits.DMA1IE = 1; //Set the DMA interrupt enable bit
+
+  DMA1CONbits.CHEN = 1; // Enable DMA
 }
 
 void initTimer3()
 {
   TMR3 = 0;
   PR3 = 4999;
-  IFS0bits.T3IF = 0; //Turn off interrupt flag
-  IEC0bits.T3IE = 0; //Enable interrupt
-  T3CONbits.TON = 1; //Turn Timer 3 on
+  IFS0bits.T3IF = 0; // Clear Timer 3 interrupt
+  IEC0bits.T3IE = 0; // Disable Timer 3 interrupt
+  T3CONbits.TON = 1; // Turn Timer 3 on
 }
 
 void setFrequency(float frequency)
 {
   float scale = 64.0;
   PR3 = (int)(1 / frequency) / (scale * (1 / FCY));
-}
-
-void setDMACNT()
-{
-  DMA1CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
 }
 
 float vn[SAMP_BUFF_SIZE];
@@ -304,19 +311,19 @@ int main(void)
   initADC();
   initDMA();
   initTimer3();
-  Init_LCD();
+  // Init_LCD();
 
   setFrequency(5000.0);
   startSamp();
 
   while (1)
   {
-    cursorHome();
-    ms_delay(1000);
-    puts_lcd("Imped = 10", 10);
-    ms_delay(1000);
-    clearDisplay();
-    ms_delay(1000);
+    // cursorHome();
+    // ms_delay(1000);
+    // puts_lcd("Imped = 10", 10);
+    // ms_delay(1000);
+    // clearDisplay();
+    // ms_delay(1000);
   }
 
   return 0;
