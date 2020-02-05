@@ -124,8 +124,8 @@ void startSamp()
 
 void initDMA()
 {
-  DMA1C1Nbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
-  DMA1C1Nbits.MODE = 0;  // continuous ping pong disabled
+  DMA1CONbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
+  DMA1CONbits.MODE = 0;  // continuous ping pong disabled
   DMA1PAD = (int)&ADC1BUF0;
   DMA1CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
   DMA1REQ = 13; // Select ADC1 as DMA Request source
