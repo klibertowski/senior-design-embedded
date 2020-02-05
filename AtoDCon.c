@@ -190,12 +190,13 @@ struct Impedance calcImpedance(float *vArr, float *iArr, int N)
 
   for (n = 0; n < N; ++n)
   {
-    float temp = *(vArr + n);
-    vReal += *(vArr + n) * cos(2 * M_PI * k * (n / N));
-    vImag += *(vArr + n) * -1 * sin(2 * M_PI * k * (n / N));
+    float t = 2 * M_PI * k * ((float)n / N);
 
-    iReal += *(iArr + n) * cos(2 * M_PI * k * (n / N));
-    iImag += *(iArr + n) * -1 * sin(2 * M_PI * k * (n / N));
+    vReal += *(vArr + n) * cos(t);
+    vImag += *(vArr + n) * -1 * sin(t);
+
+    iReal += *(iArr + n) * cos(t);
+    iImag += *(iArr + n) * -1 * sin(t);
   }
 
   struct Impedance imp;
