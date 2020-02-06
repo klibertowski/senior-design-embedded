@@ -30,28 +30,27 @@
 
 #define M_PI 3.141592653589793
 
-#define FCY 40000000
+#define FCY 40000000.0
 
 // Define Message Buffer Length for ECAN1/ECAN2
-#define MAX_CHNUM 4       // Highest Analog input number in Channel Scan
+#define MAX_CHNUM 3       // Highest Analog input number in Channel Scan
 #define SAMP_BUFF_SIZE 64 // Size of the input buffer per analog input
 #define NUM_CHS2SCAN 2    // Number of (input pins) channels enabled for channel scan
 
-// Number of locations for ADC buffer = 14 (AN0 to AN13) x 8 = 112 words
 // Align the buffer to 128 words or 256 bytes. This is needed for peripheral indirect mode
-int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(256)));
+int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(512)));
 
 // Bluetooth mac address D8:80:39:F9:17:92
 
 struct Impedance
 {
-  float real;
-  float imag;
+  double real;
+  double imag;
 };
 
 void processADCSamples(int *);
-struct Impedance calcImpedance(float *, float *, int);
-float convertSample(int);
+struct Impedance calcImpedance(double *, double *, int);
+double convertSample(int);
 void initADC();
 void readADC();
 void initDMA();
@@ -86,14 +85,16 @@ void initADC()
   AD1CON1bits.SSRC = 2;    // Sample Clock Source: GP Timer starts conversion
   AD1CON1bits.ASAM = 1;    // ADC Sample Control: Sampling begins immediately after conversion
   AD1CON1bits.AD12B = 0;   // 10-bit ADC operation
+  AD1CON1bits.SIMSAM = 1; // sample simultaneously
 
-  AD1CON2bits.CSCNA = 1;               // Scan Input Selections for CH0+ during Sample A bit
-  AD1CON2bits.CHPS = 0;                // Converts CH0
-  AD1CON2bits.SMPI = NUM_CHS2SCAN - 1; // 4 ADC Channel is scanned
+  AD1CON2bits.CSCNA = 1; // Scan Input Selections for CH0+ during Sample A bit
+  AD1CON2bits.CHPS = 1; // Converts CH0 and CH1
+  AD1CON2bits.SMPI = 0; // 2 ADC Channel is scanned
 
-  AD1CON3bits.ADRC = 0;  // ADC Clock is derived from Systems Clock
-  AD1CON3bits.ADCS = 63; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*64 = 1.6us (625Khz)
-                         // ADC Conversion Time for 10-bit Tc=12*Tab = 19.2us
+  AD1CON3bits.ADRC = 0; // ADC Clock is derived from Systems Clock
+  AD1CON3bits.ADCS = 3; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*64 = 1.6us (625Khz)
+                        // ADC Conversion Time for 10-bit Tc=12*Tab = 19.2us
+  AD1CON3bits.SAMC = 1;
 
   AD1CON4bits.DMABL = 6; // Each buffer contains 64 words
 
@@ -106,15 +107,22 @@ void initADC()
   // AD1CHS123bits.CH123NA = 0;
   // AD1CHS0bits.CH0SA = 3; //CH0 is AN3
 
+  //AD1CHS0: A/D Input Select Register
+  AD1CHS0bits.CH0SA = 0; // MUXA +ve input selection (AIN0) for CH0
+  AD1CHS0bits.CH0NA = 0; // MUXA -ve input selection (VREF-) for CH0
+  //AD1CHS123: A/D Input Select Register
+  AD1CHS123bits.CH123SA = 1; // MUXA +ve input selection (AIN3) for CH1
+  AD1CHS123bits.CH123NA = 0; // MUXA -ve input selection (VREF-) for CH1
+
   //AD1PCFGH/AD1PCFGL: Port Configuration Register
   AD1PCFGH = 0xFFFF;
   AD1PCFGL = 0xFFFF;
-  AD1PCFGLbits.PCFG0 = 0; //AN0 is analog
-  AD1PCFGLbits.PCFG3 = 0; //AN3 is analog
+  AD1PCFGLbits.PCFG0 = 0; // AN0 is analog
+  AD1PCFGLbits.PCFG3 = 0; // AN3 is analog
 
   IFS0bits.AD1IF = 0;   // Clear the A/D interrupt flag bit
   IEC0bits.AD1IE = 0;   // Do Not Enable A/D interrupt
-  AD1CON1bits.ADON = 1; //Turn on AD
+  AD1CON1bits.ADON = 1; // Turn on AD
 }
 
 void startSamp()
@@ -124,13 +132,13 @@ void startSamp()
 
 void initDMA()
 {
-  DMA1C1Nbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
-  DMA1C1Nbits.MODE = 0;  // continuous ping pong disabled
+  DMA1CONbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
+  DMA1CONbits.MODE = 0;  // continuous ping pong disabled
   DMA1PAD = (int)&ADC1BUF0;
   DMA1CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
   DMA1REQ = 13; // Select ADC1 as DMA Request source
 
-  DMA0STA = __builtin_dmaoffset(BufferA);
+  DMA1STA = __builtin_dmaoffset(BufferA);
 
   IFS0bits.DMA1IF = 0; //Clear the DMA interrupt flag bit
   IEC0bits.DMA1IE = 1; //Set the DMA interrupt enable bit
@@ -138,27 +146,32 @@ void initDMA()
   DMA1CONbits.CHEN = 1; // Enable DMA
 }
 
-void initTimer3()
+void initTimer3(double frequency)
 {
   TMR3 = 0;
-  PR3 = 4999;
+
+  double scale = 4.0;
+  int pr3Value = (1.0 / frequency) / (scale * (1.0 / FCY));
+  PR3 = pr3Value;
+
   IFS0bits.T3IF = 0; // Clear Timer 3 interrupt
   IEC0bits.T3IE = 0; // Disable Timer 3 interrupt
   T3CONbits.TON = 1; // Turn Timer 3 on
 }
 
-void setFrequency(float frequency)
+void setFrequency(double frequency)
 {
-  float scale = 64.0;
-  PR3 = (int)(1 / frequency) / (scale * (1 / FCY));
+  double scale = 4.0;
+  int pr3Value = (1.0 / frequency) / (scale * (1.0 / FCY));
+  PR3 = pr3Value;
 }
 
-float vn[SAMP_BUFF_SIZE];
-float in[SAMP_BUFF_SIZE];
+double vn[SAMP_BUFF_SIZE];
+double in[SAMP_BUFF_SIZE];
 
 struct Impedance currImpedance;
 
-float R = 987.0;
+double R = 9820.0;
 
 void __attribute__((interrupt, no_auto_psv)) _DMA1Interrupt(void)
 {
@@ -171,26 +184,26 @@ void __attribute__((interrupt, no_auto_psv)) _DMA1Interrupt(void)
 
   currImpedance = calcImpedance(&vn, &in, SAMP_BUFF_SIZE);
 
-  IFS0bits.DMA1IF = 0; // Clear the DMA0 Interrupt Flag
+  IFS0bits.DMA1IF = 0; // Clear the DMA1 Interrupt Flag
 }
 
-float convertSample(int samp)
+double convertSample(int samp)
 {
   return samp * (3.3 / 1024.0);
 }
 
-struct Impedance calcImpedance(float *vArr, float *iArr, int N)
+struct Impedance calcImpedance(double *vArr, double *iArr, int N)
 {
-  float vReal = 0;
-  float vImag = 0;
-  float iReal = 0;
-  float iImag = 0;
-  float k = 1.0;
+  double vReal = 0.0;
+  double vImag = 0.0;
+  double iReal = 0.0;
+  double iImag = 0.0;
+  double k = 1.0;
   int n;
 
   for (n = 0; n < N; ++n)
   {
-    float t = 2 * M_PI * k * ((float)n / N);
+    double t = 2 * M_PI * k * ((double)n / N);
 
     vReal += *(vArr + n) * cos(t);
     vImag += *(vArr + n) * -1 * sin(t);
@@ -201,8 +214,8 @@ struct Impedance calcImpedance(float *vArr, float *iArr, int N)
 
   struct Impedance imp;
 
-  float mag = sqrt(pow(vReal, 2.0) + pow(vImag, 2.0)) / sqrt(pow(iReal, 2.0) + pow(iImag, 2.0));
-  float phase = atan(vImag / vReal) - atan(iImag / iReal);
+  double mag = sqrt(pow(vReal, 2.0) + pow(vImag, 2.0)) / sqrt(pow(iReal, 2.0) + pow(iImag, 2.0));
+  double phase = atan(vImag / vReal) - atan(iImag / iReal);
 
   imp.real = mag * cos(phase);
   imp.imag = mag * sin(phase);
@@ -311,10 +324,11 @@ int main(void)
   T1CON = 0x8030;
   initADC();
   initDMA();
-  initTimer3();
+  initTimer3(64.0 * 5000.0);
   // Init_LCD();
 
-  setFrequency(5000.0);
+  // sample 64 times per square wave period
+  // setFrequency(64.0 * 500.0);
   startSamp();
 
   while (1)
