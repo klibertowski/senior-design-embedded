@@ -37,6 +37,8 @@
 #define SAMP_BUFF_SIZE 64 // Size of the input buffer per analog input
 #define NUM_CHS2SCAN 2    // Number of (input pins) channels enabled for channel scan
 
+#define SAMP_FREQUENCY 1.1e6
+
 // Align the buffer to 128 words or 256 bytes. This is needed for peripheral indirect mode
 int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(512)));
 
@@ -92,7 +94,7 @@ void initADC()
   AD1CON2bits.SMPI = 0; // 2 ADC Channel is scanned
 
   AD1CON3bits.ADRC = 0; // ADC Clock is derived from Systems Clock
-  AD1CON3bits.ADCS = 3; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*64 = 1.6us (625Khz)
+  AD1CON3bits.ADCS = 63; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*64 = 1.6us (625Khz)
                         // ADC Conversion Time for 10-bit Tc=12*Tab = 19.2us
   AD1CON3bits.SAMC = 1;
 
@@ -130,6 +132,11 @@ void startSamp()
   AD1CON1bits.SAMP = 1; // start sampling
 }
 
+void stopSamp()
+{
+  AD1CON1bits.SAMP = 0; // stop sampling
+}
+
 void initDMA()
 {
   DMA1CONbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
@@ -150,7 +157,7 @@ void initTimer3(double frequency)
 {
   TMR3 = 0;
 
-  double scale = 4.0;
+  double scale = 64.0;
   int pr3Value = (1.0 / frequency) / (scale * (1.0 / FCY));
   PR3 = pr3Value;
 
@@ -173,6 +180,14 @@ struct Impedance currImpedance;
 
 double R = 9820.0;
 
+struct SampleBuffer
+{
+  double vReal;
+  double vImag;
+  double iReal;
+  double iImag;
+};
+
 void __attribute__((interrupt, no_auto_psv)) _DMA1Interrupt(void)
 {
   int i;
@@ -183,6 +198,8 @@ void __attribute__((interrupt, no_auto_psv)) _DMA1Interrupt(void)
   }
 
   currImpedance = calcImpedance(&vn, &in, SAMP_BUFF_SIZE);
+
+  dmaInterruptCount++; // increment DMA interrupt counter
 
   IFS0bits.DMA1IF = 0; // Clear the DMA1 Interrupt Flag
 }
@@ -318,18 +335,68 @@ void cursorHome()
   lcd_cmd(0x0002);
 }
 
+int dmaInterruptCount = 0;
+struct SampleBuffer sampBuf;
+
+void measureImpedance()
+{
+  int freqs[4] = {50, 500, 5000, 50000};
+  int i;
+  struct Impedance impResults[4];
+
+  for (i = 0; i < 4; ++i)
+  {
+    // TODO: generate square wave @ freq[i]
+
+    sampBuf.vReal = 0.0;
+    sampBuf.vImag = 0.0;
+    sampBuf.iReal = 0.0;
+    sampBuf.iImag = 0.0;
+
+    startSamp();
+
+    // FIXME: sample buffer is too big for 50 kHz
+    // will only be able to get 22 samples per period for 50 kHz
+    int numInterrupts = SAMP_FREQUENCY / (SAMP_BUFF_SIZE * freqs[i]);
+    dmaInterruptCount = 0;
+
+    while (dmaInterruptCount < numInterrupts);
+
+    stopSamp();
+
+    struct Impedance imp;
+
+    double mag = sqrt(pow(sampBuf.vReal, 2.0) + pow(sampBuf.vImag, 2.0)) / sqrt(pow(sampBuf.iReal, 2.0) + pow(sampBuf.iImag, 2.0));
+    double phase = atan(sampBuf.vImag / sampBuf.vReal) - atan(sampBuf.iImag / sampBuf.iReal);
+
+    imp.real = mag * cos(phase);
+    imp.imag = mag * sin(phase);
+
+    impResults[i] = imp;
+
+    // TODO:
+    // Print to LCD
+  }
+
+  // send final results over bluetooth
+}
+
 int main(void)
 {
   initClockPLL();
   T1CON = 0x8030;
   initADC();
   initDMA();
-  initTimer3(64.0 * 5000.0);
+  // initTimer3(64.0 * 5000.0);
+  initTimer3(SAMP_FREQUENCY);
   // Init_LCD();
 
   // sample 64 times per square wave period
   // setFrequency(64.0 * 500.0);
-  startSamp();
+  
+  // startSamp();
+
+  measureImpedance();
 
   while (1)
   {
