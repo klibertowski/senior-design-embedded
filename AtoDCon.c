@@ -38,9 +38,11 @@
 #define NUM_CHS2SCAN 2    // Number of (input pins) channels enabled for channel scan
 
 #define SAMP_FREQUENCY 1.1e6
+#define MAX_SAMPLES_PER_PERIOD SAMP_FREQUENCY / 50
 
-// Align the buffer to 128 words or 256 bytes. This is needed for peripheral indirect mode
+// Align the buffer to 512 bytes. This is needed for peripheral indirect mode
 int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(512)));
+int BufferB[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(512)));
 
 // Bluetooth mac address D8:80:39:F9:17:92
 
@@ -51,7 +53,7 @@ struct Impedance
 };
 
 void processADCSamples(int *);
-struct Impedance calcImpedance(double *, double *, int);
+struct Impedance calcImpedance(int);
 double convertSample(int);
 void initADC();
 void readADC();
@@ -140,12 +142,13 @@ void stopSamp()
 void initDMA()
 {
   DMA1CONbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
-  DMA1CONbits.MODE = 0;  // continuous ping pong disabled
+  DMA1CONbits.MODE = 2;  // continuous ping pong
   DMA1PAD = (int)&ADC1BUF0;
   DMA1CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
   DMA1REQ = 13; // Select ADC1 as DMA Request source
 
   DMA1STA = __builtin_dmaoffset(BufferA);
+  DMA1STB = __builtin_dmaoffset(BufferB);
 
   IFS0bits.DMA1IF = 0; //Clear the DMA interrupt flag bit
   IEC0bits.DMA1IE = 1; //Set the DMA interrupt enable bit
@@ -173,9 +176,6 @@ void setFrequency(double frequency)
   PR3 = pr3Value;
 }
 
-double vn[SAMP_BUFF_SIZE];
-double in[SAMP_BUFF_SIZE];
-
 struct Impedance currImpedance;
 
 double R = 9820.0;
@@ -188,16 +188,36 @@ struct SampleBuffer
   double iImag;
 };
 
+// FIXME: array too large when frequency is 50
+unsigned short int vn[2200];
+unsigned short int in[2200];
+
+int dmaInterruptCount = 0;
+
+unsigned int pingPongState = 0;
+
 void __attribute__((interrupt, no_auto_psv)) _DMA1Interrupt(void)
 {
+  int bufferOffset = dmaInterruptCount * SAMP_BUFF_SIZE;
   int i;
-  for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+  if (pingPongState == 0)
   {
-    vn[i] = convertSample(BufferA[0][i]);
-    in[i] = convertSample(BufferA[3][i]) / R;
+    for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+    {
+      vn[bufferOffset + i] = BufferA[0][i];
+      in[bufferOffset + i] = BufferA[3][i];
+    }
+  }
+  else
+  {
+    for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+    {
+      vn[bufferOffset + i] = BufferB[0][i];
+      in[bufferOffset + i] = BufferB[3][i];
+    }
   }
 
-  currImpedance = calcImpedance(&vn, &in, SAMP_BUFF_SIZE);
+  pingPongState ^= 1;
 
   dmaInterruptCount++; // increment DMA interrupt counter
 
@@ -209,7 +229,7 @@ double convertSample(int samp)
   return samp * (3.3 / 1024.0);
 }
 
-struct Impedance calcImpedance(double *vArr, double *iArr, int N)
+struct Impedance calcImpedance(int N)
 {
   double vReal = 0.0;
   double vImag = 0.0;
@@ -221,12 +241,14 @@ struct Impedance calcImpedance(double *vArr, double *iArr, int N)
   for (n = 0; n < N; ++n)
   {
     double t = 2 * M_PI * k * ((double)n / N);
+    double v = convertSample(vn[n]);
+    double i = convertSample(in[n]) / R;
 
-    vReal += *(vArr + n) * cos(t);
-    vImag += *(vArr + n) * -1 * sin(t);
+    vReal += v * cos(t);
+    vImag += v * -1 * sin(t);
 
-    iReal += *(iArr + n) * cos(t);
-    iImag += *(iArr + n) * -1 * sin(t);
+    iReal += i * cos(t);
+    iImag += i * -1 * sin(t);
   }
 
   struct Impedance imp;
@@ -335,9 +357,6 @@ void cursorHome()
   lcd_cmd(0x0002);
 }
 
-int dmaInterruptCount = 0;
-struct SampleBuffer sampBuf;
-
 void measureImpedance()
 {
   int freqs[4] = {50, 500, 5000, 50000};
@@ -348,31 +367,23 @@ void measureImpedance()
   {
     // TODO: generate square wave @ freq[i]
 
-    sampBuf.vReal = 0.0;
-    sampBuf.vImag = 0.0;
-    sampBuf.iReal = 0.0;
-    sampBuf.iImag = 0.0;
+    int numSamples = SAMP_FREQUENCY / freqs[i];
+    int numInterrupts = numSamples / SAMP_BUFF_SIZE;
+
+    // account for integer division truncation
+    if (numSamples % SAMP_BUFF_SIZE != 0)
+    {
+      numInterrupts++;
+    }
 
     startSamp();
 
-    // FIXME: sample buffer is too big for 50 kHz
-    // will only be able to get 22 samples per period for 50 kHz
-    int numInterrupts = SAMP_FREQUENCY / (SAMP_BUFF_SIZE * freqs[i]);
     dmaInterruptCount = 0;
-
     while (dmaInterruptCount < numInterrupts);
 
     stopSamp();
 
-    struct Impedance imp;
-
-    double mag = sqrt(pow(sampBuf.vReal, 2.0) + pow(sampBuf.vImag, 2.0)) / sqrt(pow(sampBuf.iReal, 2.0) + pow(sampBuf.iImag, 2.0));
-    double phase = atan(sampBuf.vImag / sampBuf.vReal) - atan(sampBuf.iImag / sampBuf.iReal);
-
-    imp.real = mag * cos(phase);
-    imp.imag = mag * sin(phase);
-
-    impResults[i] = imp;
+    impResults[i] = calcImpedance(numSamples);
 
     // TODO:
     // Print to LCD
