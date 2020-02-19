@@ -34,15 +34,15 @@
 
 // Define Message Buffer Length for ECAN1/ECAN2
 #define MAX_CHNUM 3       // Highest Analog input number in Channel Scan
-#define SAMP_BUFF_SIZE 64 // Size of the input buffer per analog input
+#define SAMP_BUFF_SIZE 128 // Size of the input buffer per analog input
 #define NUM_CHS2SCAN 2    // Number of (input pins) channels enabled for channel scan
 
-#define SAMP_FREQUENCY 1.1e6
+#define SAMP_FREQUENCY 500000
 #define MAX_SAMPLES_PER_PERIOD SAMP_FREQUENCY / 50
 
 // Align the buffer to 512 bytes. This is needed for peripheral indirect mode
-int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(512)));
-int BufferB[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(512)));
+int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(1024)));
+int BufferB[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(1024)));
 
 // Bluetooth mac address D8:80:39:F9:17:92
 
@@ -96,11 +96,11 @@ void initADC()
   AD1CON2bits.SMPI = 0; // 2 ADC Channel is scanned
 
   AD1CON3bits.ADRC = 0; // ADC Clock is derived from Systems Clock
-  AD1CON3bits.ADCS = 63; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*64 = 1.6us (625Khz)
-                        // ADC Conversion Time for 10-bit Tc=12*Tab = 19.2us
+  AD1CON3bits.ADCS = 1; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*2
+                        // ADC Conversion Time for 10-bit Tc=12*Tab
   AD1CON3bits.SAMC = 1;
 
-  AD1CON4bits.DMABL = 6; // Each buffer contains 64 words
+  AD1CON4bits.DMABL = 7; // Each buffer contains 128 words
 
   //AD1CSSH/AD1CSSL: A/D Input Scan Selection Register
   AD1CSSH = 0x0000;
@@ -132,48 +132,40 @@ void initADC()
 void startSamp()
 {
   AD1CON1bits.SAMP = 1; // start sampling
+  DMA0CONbits.CHEN = 1; // Enable DMA
 }
 
 void stopSamp()
 {
   AD1CON1bits.SAMP = 0; // stop sampling
+  DMA0CONbits.CHEN = 0; // disable DMA
 }
 
 void initDMA()
 {
-  DMA1CONbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
-  DMA1CONbits.MODE = 2;  // continuous ping pong
-  DMA1PAD = (int)&ADC1BUF0;
-  DMA1CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
-  DMA1REQ = 13; // Select ADC1 as DMA Request source
+  DMA0CONbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
+  DMA0CONbits.MODE = 2;  // continuous ping pong
+  DMA0PAD = (int)&ADC1BUF0;
+  DMA0CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
+  DMA0REQ = 13; // Select ADC1 as DMA Request source
 
-  DMA1STA = __builtin_dmaoffset(BufferA);
-  DMA1STB = __builtin_dmaoffset(BufferB);
+  DMA0STA = __builtin_dmaoffset(BufferA);
+  DMA0STB = __builtin_dmaoffset(BufferB);
 
-  IFS0bits.DMA1IF = 0; //Clear the DMA interrupt flag bit
-  IEC0bits.DMA1IE = 1; //Set the DMA interrupt enable bit
-
-  DMA1CONbits.CHEN = 1; // Enable DMA
+  IFS0bits.DMA0IF = 0; //Clear the DMA interrupt flag bit
+  IEC0bits.DMA0IE = 1; //Set the DMA interrupt enable bit
 }
 
 void initTimer3(double frequency)
 {
-  TMR3 = 0;
+  TMR3 = 0x0000;
 
-  double scale = 64.0;
-  int pr3Value = (1.0 / frequency) / (scale * (1.0 / FCY));
-  PR3 = pr3Value;
+  double scale = 2.0;
+  PR3 = (1.0 / frequency) / (scale * (1.0 / FCY));
 
   IFS0bits.T3IF = 0; // Clear Timer 3 interrupt
   IEC0bits.T3IE = 0; // Disable Timer 3 interrupt
   T3CONbits.TON = 1; // Turn Timer 3 on
-}
-
-void setFrequency(double frequency)
-{
-  double scale = 4.0;
-  int pr3Value = (1.0 / frequency) / (scale * (1.0 / FCY));
-  PR3 = pr3Value;
 }
 
 struct Impedance currImpedance;
@@ -189,39 +181,106 @@ struct SampleBuffer
 };
 
 // FIXME: array too large when frequency is 50
-unsigned short int vn[2200];
-unsigned short int in[2200];
+unsigned short int vn[10000];
+unsigned short int in[10000];
 
 int dmaInterruptCount = 0;
-
+int sampAvg = 0;
 unsigned int pingPongState = 0;
 
-void __attribute__((interrupt, no_auto_psv)) _DMA1Interrupt(void)
+double avgArray(int *a, int N)
+{
+  int sum = 0;
+  int i = 0;
+
+  for (i = 0; i < N; ++i)
+  {
+    sum += *(a + i);
+  }
+
+  return (double)sum / N;
+}
+
+void __attribute__((interrupt, no_auto_psv)) _DMA0Interrupt(void)
 {
   int bufferOffset = dmaInterruptCount * SAMP_BUFF_SIZE;
   int i;
-  if (pingPongState == 0)
+
+  if (sampAvg > 0)
   {
-    for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+    int vSamps[sampAvg];
+    int iSamps[sampAvg];
+    int sampPtr = 0;
+    int avgBuffOffset = dmaInterruptCount * (SAMP_BUFF_SIZE / sampAvg);
+
+    if (pingPongState == 0)
     {
-      vn[bufferOffset + i] = BufferA[0][i];
-      in[bufferOffset + i] = BufferA[3][i];
+      for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+      {
+        int ptr = sampPtr++;
+        vSamps[sampPtr] = BufferA[0][i];
+        vSamps[sampPtr] = BufferA[3][i];
+
+        if (sampPtr == sampAvg)
+        {
+          vn[avgBuffOffset + (i / sampAvg)] = avgArray(&vSamps, sampAvg);
+          in[avgBuffOffset + (i / sampAvg)] = avgArray(&iSamps, sampAvg);
+          sampPtr = 0;
+        }
+        else if (i == SAMP_BUFF_SIZE - 1)
+        {
+          vn[avgBuffOffset + (i / sampAvg)] = avgArray(&vSamps, (SAMP_BUFF_SIZE % avgSamp) + 1);
+          in[avgBuffOffset + (i / sampAvg)] = avgArray(&iSamps, (SAMP_BUFF_SIZE % avgSamp) + 1);
+        }
+      }
+    }
+    else
+    {
+      for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+      {
+        int ptr = sampPtr++;
+        vSamps[sampPtr] = BufferB[0][i];
+        vSamps[sampPtr] = BufferB[3][i];
+
+        if (sampPtr == sampAvg)
+        {
+          vn[bufferOffset + i] = avgArray(&vSamps, sampAvg);
+          in[bufferOffset + i] = avgArray(&iSamps, sampAvg);
+          sampPtr = 0;
+        }
+        else if (i == SAMP_BUFF_SIZE - 1)
+        {
+          vn[bufferOffset + i] = avgArray(&vSamps, (SAMP_BUFF_SIZE % avgSamp) + 1);
+          in[bufferOffset + i] = avgArray(&iSamps, (SAMP_BUFF_SIZE % avgSamp) + 1);
+        }
+      }
     }
   }
   else
   {
-    for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+    if (pingPongState == 0)
     {
-      vn[bufferOffset + i] = BufferB[0][i];
-      in[bufferOffset + i] = BufferB[3][i];
+      for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+      {
+        vn[bufferOffset + i] = BufferA[0][i];
+        in[bufferOffset + i] = BufferA[3][i];
+      }
     }
-  }
+    else
+    {
+      for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+      {
+        vn[bufferOffset + i] = BufferB[0][i];
+        in[bufferOffset + i] = BufferB[3][i];
+      }
+    }
+  }  
 
   pingPongState ^= 1;
 
   dmaInterruptCount++; // increment DMA interrupt counter
 
-  IFS0bits.DMA1IF = 0; // Clear the DMA1 Interrupt Flag
+  IFS0bits.DMA0IF = 0; // Clear the DMA0 Interrupt Flag
 }
 
 double convertSample(int samp)
@@ -357,21 +416,36 @@ void cursorHome()
   lcd_cmd(0x0002);
 }
 
+void initPWM()
+{
+
+}
+
+void startSquareWave(int frequency)
+{
+  
+}
+
+void stopSquareWave()
+{
+
+}
+
 void measureImpedance()
 {
-  int freqs[4] = {50, 500, 5000, 50000};
+  int freqs[3] = {500, 5000, 50000};
   int i;
-  struct Impedance impResults[4];
+  struct Impedance impResults[3];
 
-  for (i = 0; i < 4; ++i)
+  for (i = 0; i < sizeof(freqs) / sizeof(freqs[0]); ++i)
   {
-    // TODO: generate square wave @ freq[i]
+    startSquareWave(freqs[i]);
 
     int numSamples = SAMP_FREQUENCY / freqs[i];
     int numInterrupts = numSamples / SAMP_BUFF_SIZE;
 
     // account for integer division truncation
-    if (numSamples % SAMP_BUFF_SIZE != 0)
+    if (numInterrupts == 0 || numSamples % SAMP_BUFF_SIZE != 0)
     {
       numInterrupts++;
     }
@@ -382,6 +456,7 @@ void measureImpedance()
     while (dmaInterruptCount < numInterrupts);
 
     stopSamp();
+    stopSquareWave();
 
     impResults[i] = calcImpedance(numSamples);
 
@@ -398,14 +473,9 @@ int main(void)
   T1CON = 0x8030;
   initADC();
   initDMA();
-  // initTimer3(64.0 * 5000.0);
   initTimer3(SAMP_FREQUENCY);
+  initPWM();
   // Init_LCD();
-
-  // sample 64 times per square wave period
-  // setFrequency(64.0 * 500.0);
-  
-  // startSamp();
 
   measureImpedance();
 
