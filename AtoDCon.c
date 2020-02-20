@@ -60,7 +60,7 @@ void initDMA();
 void ms_delay(int N)
 {
   int delay;
-  delay = N * 62.5; // N ms delay -- change for 40 MHz instead of 15 MHz
+  delay = N * 62.5; // N ms delay -- change for 40 MHz instead of 16 MHz
   TMR1 = 0;         // reset TMR1
   while (TMR1 < delay)
     ; // wait for delay time
