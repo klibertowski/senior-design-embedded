@@ -30,7 +30,7 @@
 
 #define M_PI 3.141592653589793
 
-#define FCY 40000000.0
+#define FCY 42016000.0
 
 // Define Message Buffer Length for ECAN1/ECAN2
 #define MAX_CHNUM 3       // Highest Analog input number in Channel Scan
@@ -61,11 +61,21 @@ void initDMA();
 
 void ms_delay(int N)
 {
-  int delay;
-  delay = N * 62.5; // N ms delay
-  TMR1 = 0;         // reset TMR1
-  while (TMR1 < delay)
-    ; // wait for delay time
+  unsigned int delay = N; // N ms delay
+  int i;
+  int numLoops = N / 399;
+
+  for (i = 0; i <= numLoops; ++i) {
+    TMR1 = 0;         // reset TMR1
+    int tmr1Delay = delay % 399;
+    if (i < numLoops) {
+      tmr1Delay = 399;
+    }
+    
+    tmr1Delay *= 164;
+
+    while (TMR1 < tmr1Delay); // wait for delay time
+  }
 }
 
 void initClockPLL()
@@ -168,6 +178,26 @@ void initTimer3(double frequency)
   T3CONbits.TON = 1; // Turn Timer 3 on
 }
 
+void initPWM(double frequency)
+{
+  T2CON = 0x0000;
+  PR2 = ((FCY / frequency) - 1) / 2; // divide by 2 since we need 2 toggles for a full period
+
+  OC1CONbits.OCSIDL = 0;
+  OC1CONbits.OCFLT = 0; // PWM fault detection, not used unless OCM=0b111
+  OC1CONbits.OCTSEL = 0; // use timer 2
+  OC1CONbits.OCM = 3; // toggle mode, i.e. square wave
+
+  OC1R = 0;
+
+  T2CONbits.TON = 1; // turn timer 2 on
+}
+
+void stopPWM()
+{
+  T2CONbits.TON = 0; // turn timer 2 off
+}
+
 struct Impedance currImpedance;
 
 double R = 9820.0;
@@ -180,9 +210,8 @@ struct SampleBuffer
   double iImag;
 };
 
-// FIXME: array too large when frequency is 50
-unsigned short int vn[10000];
-unsigned short int in[10000];
+unsigned short int vn[2200];
+unsigned short int in[2200];
 
 int dmaInterruptCount = 0;
 int sampAvg = 0;
@@ -205,74 +234,20 @@ void __attribute__((interrupt, no_auto_psv)) _DMA0Interrupt(void)
 {
   int bufferOffset = dmaInterruptCount * SAMP_BUFF_SIZE;
   int i;
-
-  if (sampAvg > 0)
+  if (pingPongState == 0)
   {
-    int vSamps[sampAvg];
-    int iSamps[sampAvg];
-    int sampPtr = 0;
-    int avgBuffOffset = dmaInterruptCount * (SAMP_BUFF_SIZE / sampAvg);
-
-    if (pingPongState == 0)
+    for (i = 0; i < SAMP_BUFF_SIZE; ++i)
     {
-      for (i = 0; i < SAMP_BUFF_SIZE; ++i)
-      {
-        int ptr = sampPtr++;
-        vSamps[sampPtr] = BufferA[0][i];
-        vSamps[sampPtr] = BufferA[3][i];
-
-        if (sampPtr == sampAvg)
-        {
-          vn[avgBuffOffset + (i / sampAvg)] = avgArray(&vSamps, sampAvg);
-          in[avgBuffOffset + (i / sampAvg)] = avgArray(&iSamps, sampAvg);
-          sampPtr = 0;
-        }
-        else if (i == SAMP_BUFF_SIZE - 1)
-        {
-          vn[avgBuffOffset + (i / sampAvg)] = avgArray(&vSamps, (SAMP_BUFF_SIZE % avgSamp) + 1);
-          in[avgBuffOffset + (i / sampAvg)] = avgArray(&iSamps, (SAMP_BUFF_SIZE % avgSamp) + 1);
-        }
-      }
-    }
-    else
-    {
-      for (i = 0; i < SAMP_BUFF_SIZE; ++i)
-      {
-        int ptr = sampPtr++;
-        vSamps[sampPtr] = BufferB[0][i];
-        vSamps[sampPtr] = BufferB[3][i];
-
-        if (sampPtr == sampAvg)
-        {
-          vn[bufferOffset + i] = avgArray(&vSamps, sampAvg);
-          in[bufferOffset + i] = avgArray(&iSamps, sampAvg);
-          sampPtr = 0;
-        }
-        else if (i == SAMP_BUFF_SIZE - 1)
-        {
-          vn[bufferOffset + i] = avgArray(&vSamps, (SAMP_BUFF_SIZE % avgSamp) + 1);
-          in[bufferOffset + i] = avgArray(&iSamps, (SAMP_BUFF_SIZE % avgSamp) + 1);
-        }
-      }
+      vn[bufferOffset + i] = BufferA[0][i];
+      in[bufferOffset + i] = BufferA[3][i];
     }
   }
   else
   {
-    if (pingPongState == 0)
+    for (i = 0; i < SAMP_BUFF_SIZE; ++i)
     {
-      for (i = 0; i < SAMP_BUFF_SIZE; ++i)
-      {
-        vn[bufferOffset + i] = BufferA[0][i];
-        in[bufferOffset + i] = BufferA[3][i];
-      }
-    }
-    else
-    {
-      for (i = 0; i < SAMP_BUFF_SIZE; ++i)
-      {
-        vn[bufferOffset + i] = BufferB[0][i];
-        in[bufferOffset + i] = BufferB[3][i];
-      }
+      vn[bufferOffset + i] = BufferB[0][i];
+      in[bufferOffset + i] = BufferB[3][i];
     }
   }  
 
@@ -300,8 +275,8 @@ struct Impedance calcImpedance(int N)
   for (n = 0; n < N; ++n)
   {
     double t = 2 * M_PI * k * ((double)n / N);
-    double v = convertSample(vn[n]);
-    double i = convertSample(in[n]) / R;
+    double v = convertSample(vn[n]) * 3.3;
+    double i = convertSample(in[n]) / 1000.0;
 
     vReal += v * cos(t);
     vImag += v * -1 * sin(t);
@@ -384,6 +359,12 @@ void lcd_cmd(char cmd) // subroutiune for lcd commands
   ms_delay(5); // 5ms delay
 }
 
+void bottomLine()
+{
+  lcd_cmd(0xC0);
+  ms_delay(10);
+}
+
 void lcd_data(char data) // subroutine for lcd data
 {
   RW = 0;         // ensure RW is 0
@@ -391,7 +372,7 @@ void lcd_data(char data) // subroutine for lcd data
   DATA &= 0xFF00; // prepare RD0 - RD7
   DATA |= data;   // data byte to lcd
   E = 1;
-  ms_delay(50);
+  ms_delay(10);
   //NOP
   E = 0;  // toggle E signal
   RS = 0; // negate register select to 0
@@ -416,30 +397,26 @@ void cursorHome()
   lcd_cmd(0x0002);
 }
 
-void initPWM()
-{
-
-}
-
-void startSquareWave(int frequency)
-{
-  
-}
-
-void stopSquareWave()
-{
-
-}
-
 void measureImpedance()
 {
-  int freqs[3] = {500, 5000, 50000};
+  unsigned int freqs[3] = {50, 500, 5000, 50000};
   int i;
-  struct Impedance impResults[3];
+  struct Impedance impResults[4];
+
+  unsigned char impedanceStr[19];
 
   for (i = 0; i < sizeof(freqs) / sizeof(freqs[0]); ++i)
   {
-    startSquareWave(freqs[i]);
+    clearDisplay();
+    ms_delay(100);
+    cursorHome();
+    ms_delay(100);
+    sprintf(impedanceStr, "Measure %uHz", freqs[i]);
+    puts_lcd(impedanceStr, 13 + i);
+    ms_delay(3000);
+
+    initPWM(freqs[i]);
+    ms_delay(500); // wait 0.5s to reach steady state
 
     int numSamples = SAMP_FREQUENCY / freqs[i];
     int numInterrupts = numSamples / SAMP_BUFF_SIZE;
@@ -456,12 +433,19 @@ void measureImpedance()
     while (dmaInterruptCount < numInterrupts);
 
     stopSamp();
-    stopSquareWave();
+    stopPWM();
 
     impResults[i] = calcImpedance(numSamples);
 
-    // TODO:
-    // Print to LCD
+    clearDisplay();
+    cursorHome();
+    ms_delay(100);
+    sprintf(impedanceStr, "Re. %+.2e", impResults[i].real);
+    puts_lcd(impedanceStr, 13);
+    bottomLine();
+    sprintf(impedanceStr, "Im. %+.2e",impResults[i].imag);
+    puts_lcd(impedanceStr, 13);
+    ms_delay(5000);
   }
 
   // send final results over bluetooth
@@ -471,11 +455,13 @@ int main(void)
 {
   initClockPLL();
   T1CON = 0x8030;
+  T1CONbits.TCKPS = 3; // prescale period of 256
+  T1CONbits.TON = 1; // Turn Timer 1 on
+
   initADC();
   initDMA();
   initTimer3(SAMP_FREQUENCY);
-  initPWM();
-  // Init_LCD();
+  Init_LCD();
 
   measureImpedance();
 
