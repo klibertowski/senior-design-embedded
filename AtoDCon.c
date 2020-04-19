@@ -30,17 +30,19 @@
 
 #define M_PI 3.141592653589793
 
-#define FCY 40000000.0
+#define FCY 42016000.0
 
 // Define Message Buffer Length for ECAN1/ECAN2
 #define MAX_CHNUM 3       // Highest Analog input number in Channel Scan
-#define SAMP_BUFF_SIZE 64 // Size of the input buffer per analog input
+#define SAMP_BUFF_SIZE 128 // Size of the input buffer per analog input
 #define NUM_CHS2SCAN 2    // Number of (input pins) channels enabled for channel scan
 
-#define SAMP_FREQUENCY 1.1e6
+#define SAMP_FREQUENCY 500000
+#define MAX_SAMPLES_PER_PERIOD SAMP_FREQUENCY / 50
 
-// Align the buffer to 128 words or 256 bytes. This is needed for peripheral indirect mode
-int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(512)));
+// Align the buffer to 512 bytes. This is needed for peripheral indirect mode
+int BufferA[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(1024)));
+int BufferB[MAX_CHNUM + 1][SAMP_BUFF_SIZE] __attribute__((space(dma), aligned(1024)));
 
 // Bluetooth mac address D8:80:39:F9:17:92
 
@@ -51,7 +53,7 @@ struct Impedance
 };
 
 void processADCSamples(int *);
-struct Impedance calcImpedance(double *, double *, int);
+struct Impedance calcImpedance(int);
 double convertSample(int);
 void initADC();
 void readADC();
@@ -59,11 +61,21 @@ void initDMA();
 
 void ms_delay(int N)
 {
-  int delay;
-  delay = N * 62.5; // N ms delay -- change for 40 MHz instead of 16 MHz
-  TMR1 = 0;         // reset TMR1
-  while (TMR1 < delay)
-    ; // wait for delay time
+  unsigned int delay = N; // N ms delay
+  int i;
+  int numLoops = N / 399;
+
+  for (i = 0; i <= numLoops; ++i) {
+    TMR1 = 0;         // reset TMR1
+    int tmr1Delay = delay % 399;
+    if (i < numLoops) {
+      tmr1Delay = 399;
+    }
+    
+    tmr1Delay *= 164;
+
+    while (TMR1 < tmr1Delay); // wait for delay time
+  }
 }
 
 void initClockPLL()
@@ -94,11 +106,11 @@ void initADC()
   AD1CON2bits.SMPI = 0; // 2 ADC Channel is scanned
 
   AD1CON3bits.ADRC = 0; // ADC Clock is derived from Systems Clock
-  AD1CON3bits.ADCS = 63; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*64 = 1.6us (625Khz)
-                        // ADC Conversion Time for 10-bit Tc=12*Tab = 19.2us
+  AD1CON3bits.ADCS = 1; // ADC Conversion Clock Tad=Tcy*(ADCS+1)= (1/40M)*2
+                        // ADC Conversion Time for 10-bit Tc=12*Tab
   AD1CON3bits.SAMC = 1;
 
-  AD1CON4bits.DMABL = 6; // Each buffer contains 64 words
+  AD1CON4bits.DMABL = 7; // Each buffer contains 128 words
 
   //AD1CSSH/AD1CSSL: A/D Input Scan Selection Register
   AD1CSSH = 0x0000;
@@ -130,51 +142,61 @@ void initADC()
 void startSamp()
 {
   AD1CON1bits.SAMP = 1; // start sampling
+  DMA0CONbits.CHEN = 1; // Enable DMA
 }
 
 void stopSamp()
 {
   AD1CON1bits.SAMP = 0; // stop sampling
+  DMA0CONbits.CHEN = 0; // disable DMA
 }
 
 void initDMA()
 {
-  DMA1CONbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
-  DMA1CONbits.MODE = 0;  // continuous ping pong disabled
-  DMA1PAD = (int)&ADC1BUF0;
-  DMA1CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
-  DMA1REQ = 13; // Select ADC1 as DMA Request source
+  DMA0CONbits.AMODE = 2; // Configure DMA for Peripheral indirect mode
+  DMA0CONbits.MODE = 2;  // continuous ping pong
+  DMA0PAD = (int)&ADC1BUF0;
+  DMA0CNT = (SAMP_BUFF_SIZE * NUM_CHS2SCAN) - 1;
+  DMA0REQ = 13; // Select ADC1 as DMA Request source
 
-  DMA1STA = __builtin_dmaoffset(BufferA);
+  DMA0STA = __builtin_dmaoffset(BufferA);
+  DMA0STB = __builtin_dmaoffset(BufferB);
 
-  IFS0bits.DMA1IF = 0; //Clear the DMA interrupt flag bit
-  IEC0bits.DMA1IE = 1; //Set the DMA interrupt enable bit
-
-  DMA1CONbits.CHEN = 1; // Enable DMA
+  IFS0bits.DMA0IF = 0; //Clear the DMA interrupt flag bit
+  IEC0bits.DMA0IE = 1; //Set the DMA interrupt enable bit
 }
 
 void initTimer3(double frequency)
 {
-  TMR3 = 0;
+  TMR3 = 0x0000;
 
-  double scale = 64.0;
-  int pr3Value = (1.0 / frequency) / (scale * (1.0 / FCY));
-  PR3 = pr3Value;
+  double scale = 2.0;
+  PR3 = (1.0 / frequency) / (scale * (1.0 / FCY));
 
   IFS0bits.T3IF = 0; // Clear Timer 3 interrupt
   IEC0bits.T3IE = 0; // Disable Timer 3 interrupt
   T3CONbits.TON = 1; // Turn Timer 3 on
 }
 
-void setFrequency(double frequency)
+void initPWM(double frequency)
 {
-  double scale = 4.0;
-  int pr3Value = (1.0 / frequency) / (scale * (1.0 / FCY));
-  PR3 = pr3Value;
+  T2CON = 0x0000;
+  PR2 = ((FCY / frequency) - 1) / 2; // divide by 2 since we need 2 toggles for a full period
+
+  OC1CONbits.OCSIDL = 0;
+  OC1CONbits.OCFLT = 0; // PWM fault detection, not used unless OCM=0b111
+  OC1CONbits.OCTSEL = 0; // use timer 2
+  OC1CONbits.OCM = 3; // toggle mode, i.e. square wave
+
+  OC1R = 0;
+
+  T2CONbits.TON = 1; // turn timer 2 on
 }
 
-double vn[SAMP_BUFF_SIZE];
-double in[SAMP_BUFF_SIZE];
+void stopPWM()
+{
+  T2CONbits.TON = 0; // turn timer 2 off
+}
 
 struct Impedance currImpedance;
 
@@ -188,20 +210,52 @@ struct SampleBuffer
   double iImag;
 };
 
-void __attribute__((interrupt, no_auto_psv)) _DMA1Interrupt(void)
+unsigned short int vn[2200];
+unsigned short int in[2200];
+
+int dmaInterruptCount = 0;
+int sampAvg = 0;
+unsigned int pingPongState = 0;
+
+double avgArray(int *a, int N)
 {
-  int i;
-  for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+  int sum = 0;
+  int i = 0;
+
+  for (i = 0; i < N; ++i)
   {
-    vn[i] = convertSample(BufferA[0][i]);
-    in[i] = convertSample(BufferA[3][i]) / R;
+    sum += *(a + i);
   }
 
-  currImpedance = calcImpedance(&vn, &in, SAMP_BUFF_SIZE);
+  return (double)sum / N;
+}
+
+void __attribute__((interrupt, no_auto_psv)) _DMA0Interrupt(void)
+{
+  int bufferOffset = dmaInterruptCount * SAMP_BUFF_SIZE;
+  int i;
+  if (pingPongState == 0)
+  {
+    for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+    {
+      vn[bufferOffset + i] = BufferA[0][i];
+      in[bufferOffset + i] = BufferA[3][i];
+    }
+  }
+  else
+  {
+    for (i = 0; i < SAMP_BUFF_SIZE; ++i)
+    {
+      vn[bufferOffset + i] = BufferB[0][i];
+      in[bufferOffset + i] = BufferB[3][i];
+    }
+  }  
+
+  pingPongState ^= 1;
 
   dmaInterruptCount++; // increment DMA interrupt counter
 
-  IFS0bits.DMA1IF = 0; // Clear the DMA1 Interrupt Flag
+  IFS0bits.DMA0IF = 0; // Clear the DMA0 Interrupt Flag
 }
 
 double convertSample(int samp)
@@ -209,7 +263,7 @@ double convertSample(int samp)
   return samp * (3.3 / 1024.0);
 }
 
-struct Impedance calcImpedance(double *vArr, double *iArr, int N)
+struct Impedance calcImpedance(int N)
 {
   double vReal = 0.0;
   double vImag = 0.0;
@@ -221,12 +275,14 @@ struct Impedance calcImpedance(double *vArr, double *iArr, int N)
   for (n = 0; n < N; ++n)
   {
     double t = 2 * M_PI * k * ((double)n / N);
+    double v = convertSample(vn[n]) * 3.3;
+    double i = convertSample(in[n]) / 1000.0;
 
-    vReal += *(vArr + n) * cos(t);
-    vImag += *(vArr + n) * -1 * sin(t);
+    vReal += v * cos(t);
+    vImag += v * -1 * sin(t);
 
-    iReal += *(iArr + n) * cos(t);
-    iImag += *(iArr + n) * -1 * sin(t);
+    iReal += i * cos(t);
+    iImag += i * -1 * sin(t);
   }
 
   struct Impedance imp;
@@ -303,6 +359,12 @@ void lcd_cmd(char cmd) // subroutiune for lcd commands
   ms_delay(5); // 5ms delay
 }
 
+void bottomLine()
+{
+  lcd_cmd(0xC0);
+  ms_delay(10);
+}
+
 void lcd_data(char data) // subroutine for lcd data
 {
   RW = 0;         // ensure RW is 0
@@ -310,7 +372,7 @@ void lcd_data(char data) // subroutine for lcd data
   DATA &= 0xFF00; // prepare RD0 - RD7
   DATA |= data;   // data byte to lcd
   E = 1;
-  ms_delay(50);
+  ms_delay(10);
   //NOP
   E = 0;  // toggle E signal
   RS = 0; // negate register select to 0
@@ -335,47 +397,55 @@ void cursorHome()
   lcd_cmd(0x0002);
 }
 
-int dmaInterruptCount = 0;
-struct SampleBuffer sampBuf;
-
 void measureImpedance()
 {
-  int freqs[4] = {50, 500, 5000, 50000};
+  unsigned int freqs[3] = {50, 500, 5000, 50000};
   int i;
   struct Impedance impResults[4];
 
-  for (i = 0; i < 4; ++i)
-  {
-    // TODO: generate square wave @ freq[i]
+  unsigned char impedanceStr[19];
 
-    sampBuf.vReal = 0.0;
-    sampBuf.vImag = 0.0;
-    sampBuf.iReal = 0.0;
-    sampBuf.iImag = 0.0;
+  for (i = 0; i < sizeof(freqs) / sizeof(freqs[0]); ++i)
+  {
+    clearDisplay();
+    ms_delay(100);
+    cursorHome();
+    ms_delay(100);
+    sprintf(impedanceStr, "Measure %uHz", freqs[i]);
+    puts_lcd(impedanceStr, 13 + i);
+    ms_delay(3000);
+
+    initPWM(freqs[i]);
+    ms_delay(500); // wait 0.5s to reach steady state
+
+    int numSamples = SAMP_FREQUENCY / freqs[i];
+    int numInterrupts = numSamples / SAMP_BUFF_SIZE;
+
+    // account for integer division truncation
+    if (numInterrupts == 0 || numSamples % SAMP_BUFF_SIZE != 0)
+    {
+      numInterrupts++;
+    }
 
     startSamp();
 
-    // FIXME: sample buffer is too big for 50 kHz
-    // will only be able to get 22 samples per period for 50 kHz
-    int numInterrupts = SAMP_FREQUENCY / (SAMP_BUFF_SIZE * freqs[i]);
     dmaInterruptCount = 0;
-
     while (dmaInterruptCount < numInterrupts);
 
     stopSamp();
+    stopPWM();
 
-    struct Impedance imp;
+    impResults[i] = calcImpedance(numSamples);
 
-    double mag = sqrt(pow(sampBuf.vReal, 2.0) + pow(sampBuf.vImag, 2.0)) / sqrt(pow(sampBuf.iReal, 2.0) + pow(sampBuf.iImag, 2.0));
-    double phase = atan(sampBuf.vImag / sampBuf.vReal) - atan(sampBuf.iImag / sampBuf.iReal);
-
-    imp.real = mag * cos(phase);
-    imp.imag = mag * sin(phase);
-
-    impResults[i] = imp;
-
-    // TODO:
-    // Print to LCD
+    clearDisplay();
+    cursorHome();
+    ms_delay(100);
+    sprintf(impedanceStr, "Re. %+.2e", impResults[i].real);
+    puts_lcd(impedanceStr, 13);
+    bottomLine();
+    sprintf(impedanceStr, "Im. %+.2e",impResults[i].imag);
+    puts_lcd(impedanceStr, 13);
+    ms_delay(5000);
   }
 
   // send final results over bluetooth
@@ -385,16 +455,13 @@ int main(void)
 {
   initClockPLL();
   T1CON = 0x8030;
+  T1CONbits.TCKPS = 3; // prescale period of 256
+  T1CONbits.TON = 1; // Turn Timer 1 on
+
   initADC();
   initDMA();
-  // initTimer3(64.0 * 5000.0);
   initTimer3(SAMP_FREQUENCY);
-  // Init_LCD();
-
-  // sample 64 times per square wave period
-  // setFrequency(64.0 * 500.0);
-  
-  // startSamp();
+  Init_LCD();
 
   measureImpedance();
 
